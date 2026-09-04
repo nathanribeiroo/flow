@@ -13,18 +13,17 @@ func (x *execution[S]) detach(ctx context.Context, done []string) {
 	for _, from := range done {
 		for _, to := range x.r.detaches[from] {
 			snapshot := *x.state
-			x.r.wg.Go(func() { x.r.runDetached(ctx, to, &snapshot, step) })
+			x.r.wg.Go(func() { x.runDetached(ctx, to, &snapshot, step) })
 		}
 	}
 }
 
 // runDetached executa um nó destacado fora do fluxo principal: contexto sem
-// o cancelamento do Run, com o timeout obrigatório valendo por tentativa.
-func (r *Runner[S]) runDetached(ctx context.Context, name string, state *S, step int) {
-	// Descarte deliberado: a seção 4.4 da spec manda o erro da destacada para
-	// Hook e canal de eventos, que só existem na v0.3. Ele não entra em
-	// Result nem aborta nada.
-	_ = r.runNode(context.WithoutCancel(ctx), state, name, step)
+// o cancelamento do Run, com o timeout obrigatório valendo por tentativa. O
+// erro de cada tentativa sai por NodeEnd e por EventNodeEnd, que é o único
+// destino dele: não entra em Result nem aborta nada.
+func (x *execution[S]) runDetached(ctx context.Context, name string, state *S, step int) {
+	x.runNode(context.WithoutCancel(ctx), state, name, step)
 }
 
 // Wait espera as destacadas ainda vivas terminarem, ou ctx encerrar, o que

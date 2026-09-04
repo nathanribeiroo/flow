@@ -224,3 +224,101 @@ func ExampleRunner_Run_fanOut() {
 	// [plan search_kb search_web answer]
 	// 1 1
 }
+
+// printHook é um Hook mínimo: imprime cada tentativa. Um hook real abriria
+// um span no NodeStart e o fecharia no NodeEnd.
+type printHook struct{}
+
+func (printHook) NodeStart(ctx context.Context, info flow.NodeInfo) context.Context {
+	fmt.Printf("start %s run=%s step=%d attempt=%d\n", info.Node, info.RunID, info.Step, info.Attempt)
+	return ctx
+}
+
+func (printHook) NodeEnd(_ context.Context, info flow.NodeInfo, err error) {
+	fmt.Printf("end   %s err=%v\n", info.Node, err)
+}
+
+// Hook síncrono por tentativa: o nó plan falha uma vez e é retentado.
+func ExampleWithHook() {
+	calls := 0
+	flakyPlan := func(ctx context.Context, t *Ticket) error {
+		calls++
+		if calls == 1 {
+			return errors.New("transient")
+		}
+		return plan(ctx, t)
+	}
+	runner, err := flow.New[Ticket]("support").
+		Add("plan", flakyPlan, flow.WithRetry(2, 0)).
+		Add("answer", answer).
+		Start("plan").
+		Edge("plan", "answer").
+		Edge("answer", flow.End).
+		Compile()
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+
+	ticket := Ticket{Question: "reset password"}
+	res, err := runner.Run(context.Background(), &ticket, flow.WithRunID("run-1"), flow.WithHook(printHook{}))
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+	fmt.Println(res.RunID, res.Path)
+	// Output:
+	// start plan run=run-1 step=1 attempt=1
+	// end   plan err=transient
+	// start plan run=run-1 step=1 attempt=2
+	// end   plan err=<nil>
+	// start answer run=run-1 step=2 attempt=1
+	// end   answer err=<nil>
+	// run-1 [plan answer]
+}
+
+// Canal de eventos: o consumidor é dono do canal e o fecha depois de Run e
+// Wait. Aqui ele drena tudo no fim; uma CLI ao vivo leria em uma goroutine.
+func ExampleWithEvents() {
+	runner, err := flow.New[Ticket]("support").
+		Add("plan", plan).
+		Add("answer", answer).
+		Start("plan").
+		Edge("plan", "answer").
+		Edge("answer", flow.End).
+		Compile()
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+
+	events := make(chan flow.Event, 64)
+	ticket := Ticket{Question: "reset password"}
+	if _, err := runner.Run(context.Background(), &ticket, flow.WithRunID("run-2"), flow.WithEvents(events)); err != nil {
+		fmt.Println(err)
+		return
+	}
+	if err := runner.Wait(context.Background()); err != nil {
+		fmt.Println(err)
+		return
+	}
+	close(events)
+
+	names := map[flow.EventKind]string{
+		flow.EventNodeStart: "node start",
+		flow.EventNodeEnd:   "node end",
+		flow.EventStepEnd:   "step end",
+		flow.EventRunEnd:    "run end",
+	}
+	for ev := range events {
+		fmt.Printf("%-10s node=%q step=%d\n", names[ev.Kind], ev.Info.Node, ev.Info.Step)
+	}
+	// Output:
+	// node start node="plan" step=1
+	// node end   node="plan" step=1
+	// step end   node="" step=1
+	// node start node="answer" step=2
+	// node end   node="answer" step=2
+	// step end   node="" step=2
+	// run end    node="" step=2
+}

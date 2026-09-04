@@ -11,6 +11,10 @@ import (
 	"github.com/nathanribeiroo/flow"
 )
 
+// testRunID é o id passado em todo Run dos testes, para NodeError e NodeInfo
+// serem comparáveis por igualdade.
+const testRunID = "test-run"
+
 // probe é o estado dos testes: guarda a ordem em que os nós rodaram. O mutex
 // existe porque nós do mesmo superstep rodam em paralelo e todos escrevem
 // aqui; em produção cada nó escreveria só nos campos dele.
@@ -50,7 +54,7 @@ func runProbe(t *testing.T, g *flow.Graph[probe]) (flow.Result, []string) {
 		t.Fatalf("Compile() error = %v", err)
 	}
 	var p probe
-	res, err := runner.Run(t.Context(), &p)
+	res, err := runner.Run(t.Context(), &p, flow.WithRunID(testRunID))
 	if err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
@@ -156,7 +160,7 @@ func TestGraphClone(t *testing.T) {
 			t.Errorf("Mermaid() after builder change =\n%s\nwant unchanged\n%s", after, before)
 		}
 		var p probe
-		res, err := runner.Run(t.Context(), &p)
+		res, err := runner.Run(t.Context(), &p, flow.WithRunID(testRunID))
 		if err != nil {
 			t.Fatalf("Run() error = %v", err)
 		}

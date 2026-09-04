@@ -42,7 +42,7 @@ func drain(t *testing.T, g *flow.Graph[ticket], s *ticket) flow.Result {
 	if err != nil {
 		t.Fatalf("Compile() error = %v", err)
 	}
-	res, err := runner.Run(t.Context(), s)
+	res, err := runner.Run(t.Context(), s, flow.WithRunID(testRunID))
 	if err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
@@ -78,7 +78,7 @@ func TestRunnerDetach(t *testing.T) {
 			ctx, cancel := context.WithCancel(t.Context())
 			var s ticket
 			start := time.Now()
-			res, err := runner.Run(ctx, &s)
+			res, err := runner.Run(ctx, &s, flow.WithRunID(testRunID))
 			if err != nil {
 				t.Fatalf("Run() error = %v", err)
 			}
@@ -217,7 +217,7 @@ func TestRunnerDetach(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Compile() error = %v", err)
 		}
-		if _, err := runner.Run(t.Context(), &ticket{}); !errors.Is(err, errBoom) {
+		if _, err := runner.Run(t.Context(), &ticket{}, flow.WithRunID(testRunID)); !errors.Is(err, errBoom) {
 			t.Fatalf("Run() error = %v, want %v", err, errBoom)
 		}
 		if err := runner.Wait(t.Context()); err != nil {
@@ -249,7 +249,7 @@ func TestRunnerWait(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Compile() error = %v", err)
 			}
-			if _, err := runner.Run(t.Context(), &ticket{}); err != nil {
+			if _, err := runner.Run(t.Context(), &ticket{}, flow.WithRunID(testRunID)); err != nil {
 				t.Fatalf("Run() error = %v", err)
 			}
 			ctx, cancel := context.WithTimeout(t.Context(), time.Second)

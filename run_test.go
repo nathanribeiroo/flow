@@ -205,7 +205,7 @@ func TestRunnerRun(t *testing.T) {
 				t.Fatalf("Compile() error = %v", err)
 			}
 			var p probe
-			res, err := runner.Run(t.Context(), &p, tt.opts...)
+			res, err := runner.Run(t.Context(), &p, slices.Concat(tt.opts, []flow.RunOption{flow.WithRunID(testRunID)})...)
 			if !errors.Is(err, tt.wantErr) {
 				t.Fatalf("Run() error = %v, want %v", err, tt.wantErr)
 			}
@@ -284,7 +284,36 @@ func TestRunnerRunJoin(t *testing.T) {
 			wantSteps: 3,
 		},
 		{
-			name: "join inside a cycle runs once per round",
+			// Losango a -> {b, c} -> d com um ciclo interno ao ramo b: b -> e e
+			// e volta para b uma vez antes de seguir para d. Enquanto o ciclo
+			// gira, e e b alcançam d de ida, então d espera; d roda uma vez.
+			name: "cycle inside one branch of a diamond runs the join once",
+			graph: func() *flow.Graph[probe] {
+				loops := 0
+				loopOrJoin := func(_ context.Context, _ *probe) []string {
+					loops++
+					if loops < 2 {
+						return []string{"b"}
+					}
+					return []string{"d"}
+				}
+				return flow.New[probe]("g").
+					Add("a", visit("a")).Add("b", visit("b")).Add("c", visit("c")).
+					Add("d", visit("d")).Add("e", visit("e")).
+					Start("a").
+					Edge("a", "b").Edge("a", "c").
+					Edge("b", "e").
+					Branch("e", loopOrJoin, "b", "d").
+					Edge("c", "d").
+					Edge("d", flow.End)
+			},
+			wantPath:  []string{"a", "b", "c", "e", "b", "e", "d"},
+			wantSteps: 6,
+		},
+		{
+			// Grafo do README: fan-out dentro de ciclo. b e c disparam no mesmo
+			// passo em cada volta, o que os 6 passos para 8 nós provam.
+			name: "readme graph runs the fan-out in parallel inside the cycle",
 			graph: func() *flow.Graph[probe] {
 				again := func(_ context.Context, p *probe) []string {
 					if len(p.seen()) < 5 {
@@ -322,7 +351,7 @@ func TestRunnerRunJoin(t *testing.T) {
 			wantSteps: 6,
 		},
 		{
-			name: "candidates blocking each other in a circle still make progress",
+			name: "cycle entered by a fan-out is ordered by the dfs tree",
 			graph: func() *flow.Graph[probe] {
 				once := func(_ context.Context, p *probe) []string {
 					if len(p.seen()) < 3 {
@@ -350,7 +379,7 @@ func TestRunnerRunJoin(t *testing.T) {
 				t.Fatalf("Compile() error = %v", err)
 			}
 			var p probe
-			res, err := runner.Run(t.Context(), &p)
+			res, err := runner.Run(t.Context(), &p, flow.WithRunID(testRunID))
 			if err != nil {
 				t.Fatalf("Run() error = %v", err)
 			}
@@ -384,12 +413,12 @@ func TestRunnerRunFailure(t *testing.T) {
 			t.Fatalf("Compile() error = %v", err)
 		}
 		var p probe
-		res, err := runner.Run(t.Context(), &p)
+		res, err := runner.Run(t.Context(), &p, flow.WithRunID(testRunID))
 		var nerr *flow.NodeError
 		if !errors.As(err, &nerr) {
 			t.Fatalf("Run() error = %v, want *NodeError", err)
 		}
-		if want := (flow.NodeError{Node: "b", Step: 2, Attempt: 1, Err: errBoom}); *nerr != want {
+		if want := (flow.NodeError{RunID: testRunID, Node: "b", Step: 2, Attempt: 1, Err: errBoom}); *nerr != want {
 			t.Errorf("NodeError = %+v, want %+v", *nerr, want)
 		}
 		if errors.Is(err, context.Canceled) {
@@ -419,7 +448,7 @@ func TestRunnerRunFailure(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Compile() error = %v", err)
 		}
-		_, err = runner.Run(t.Context(), &probe{})
+		_, err = runner.Run(t.Context(), &probe{}, flow.WithRunID(testRunID))
 		if !errors.Is(err, errBoom) || !errors.Is(err, errOther) {
 			t.Errorf("Run() error = %v, want both %v and %v", err, errBoom, errOther)
 		}
@@ -437,7 +466,7 @@ func TestRunnerRunFailure(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Compile() error = %v", err)
 		}
-		res, err := runner.Run(t.Context(), &probe{}, flow.WithSequential())
+		res, err := runner.Run(t.Context(), &probe{}, flow.WithSequential(), flow.WithRunID(testRunID))
 		if !errors.Is(err, errBoom) {
 			t.Fatalf("Run() error = %v, want %v", err, errBoom)
 		}
@@ -456,7 +485,7 @@ func TestRunnerRunFailure(t *testing.T) {
 			t.Fatalf("Compile() error = %v", err)
 		}
 		var p probe
-		res, err := runner.Run(t.Context(), &p)
+		res, err := runner.Run(t.Context(), &p, flow.WithRunID(testRunID))
 		if err != nil {
 			t.Fatalf("Run() error = %v, want nil", err)
 		}
@@ -470,7 +499,7 @@ func TestRunnerRunFailure(t *testing.T) {
 		if !errors.As(res.Errors[0], &nerr) {
 			t.Fatalf("Errors[0] = %v, want *NodeError", res.Errors[0])
 		}
-		if want := (flow.NodeError{Node: "b", Step: 2, Attempt: 1, Err: errBoom}); *nerr != want {
+		if want := (flow.NodeError{RunID: testRunID, Node: "b", Step: 2, Attempt: 1, Err: errBoom}); *nerr != want {
 			t.Errorf("Errors[0] = %+v, want %+v", *nerr, want)
 		}
 		if visited := p.seen(); slices.Contains(visited, "b") || !slices.Contains(visited, "d") {
@@ -487,7 +516,7 @@ func TestRunnerRunFailure(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Compile() error = %v", err)
 		}
-		res, err := runner.Run(t.Context(), &probe{})
+		res, err := runner.Run(t.Context(), &probe{}, flow.WithRunID(testRunID))
 		if err != nil {
 			t.Fatalf("Run() error = %v, want nil", err)
 		}
@@ -518,7 +547,7 @@ func TestRunnerRunFailure(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Compile() error = %v", err)
 		}
-		res, err := runner.Run(t.Context(), &probe{})
+		res, err := runner.Run(t.Context(), &probe{}, flow.WithRunID(testRunID))
 		if err != nil {
 			t.Fatalf("Run() error = %v, want nil", err)
 		}
@@ -547,7 +576,7 @@ func TestRunnerRunFailure(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Compile() error = %v", err)
 		}
-		res, err := runner.Run(ctx, &probe{})
+		res, err := runner.Run(ctx, &probe{}, flow.WithRunID(testRunID))
 		if !errors.Is(err, context.Canceled) {
 			t.Fatalf("Run() error = %v, want %v", err, context.Canceled)
 		}
@@ -575,7 +604,7 @@ func TestRunnerRunBudget(t *testing.T) {
 				t.Fatalf("Compile() error = %v", err)
 			}
 			start := time.Now()
-			res, err := runner.Run(t.Context(), &probe{}, flow.WithBudget(3*time.Second))
+			res, err := runner.Run(t.Context(), &probe{}, flow.WithBudget(3*time.Second), flow.WithRunID(testRunID))
 			if !errors.Is(err, flow.ErrBudget) {
 				t.Fatalf("Run() error = %v, want %v", err, flow.ErrBudget)
 			}
@@ -604,7 +633,7 @@ func TestRunnerRunBudget(t *testing.T) {
 				t.Fatalf("Compile() error = %v", err)
 			}
 			start := time.Now()
-			_, err = runner.Run(t.Context(), &probe{}, flow.WithBudget(time.Second))
+			_, err = runner.Run(t.Context(), &probe{}, flow.WithBudget(time.Second), flow.WithRunID(testRunID))
 			if !errors.Is(err, flow.ErrBudget) {
 				t.Fatalf("Run() error = %v, want %v", err, flow.ErrBudget)
 			}
@@ -636,7 +665,7 @@ func TestRunnerRunBudget(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Compile() error = %v", err)
 			}
-			_, err = runner.Run(t.Context(), &probe{}, flow.WithBudget(time.Second))
+			_, err = runner.Run(t.Context(), &probe{}, flow.WithBudget(time.Second), flow.WithRunID(testRunID))
 			if !errors.Is(err, flow.ErrBudget) || errors.Is(err, errBoom) {
 				t.Errorf("Run() error = %v, want %v without the node error", err, flow.ErrBudget)
 			}
@@ -653,7 +682,7 @@ func TestRunnerRunBudget(t *testing.T) {
 			}
 			ctx, cancel := context.WithTimeout(t.Context(), time.Second)
 			defer cancel()
-			_, err = runner.Run(ctx, &probe{})
+			_, err = runner.Run(ctx, &probe{}, flow.WithRunID(testRunID))
 			if !errors.Is(err, context.DeadlineExceeded) || errors.Is(err, flow.ErrBudget) {
 				t.Errorf("Run() error = %v, want %v without ErrBudget", err, context.DeadlineExceeded)
 			}
@@ -671,6 +700,7 @@ func TestRunnerRunRejectsBadInput(t *testing.T) {
 		{name: "nil state", state: nil},
 		{name: "max steps below one", state: &probe{}, opts: []flow.RunOption{flow.WithMaxSteps(0)}},
 		{name: "non-positive budget", state: &probe{}, opts: []flow.RunOption{flow.WithBudget(0)}},
+		{name: "nil hook", state: &probe{}, opts: []flow.RunOption{flow.WithHook(nil)}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -679,7 +709,7 @@ func TestRunnerRunRejectsBadInput(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Compile() error = %v", err)
 			}
-			res, err := runner.Run(t.Context(), tt.state, tt.opts...)
+			res, err := runner.Run(t.Context(), tt.state, slices.Concat(tt.opts, []flow.RunOption{flow.WithRunID(testRunID)})...)
 			if err == nil {
 				t.Fatal("Run() error = nil, want error")
 			}
@@ -703,13 +733,13 @@ func TestRunnerRunNodeError(t *testing.T) {
 	}
 
 	var p probe
-	res, err := runner.Run(t.Context(), &p)
+	res, err := runner.Run(t.Context(), &p, flow.WithRunID(testRunID))
 
 	var nerr *flow.NodeError
 	if !errors.As(err, &nerr) {
 		t.Fatalf("Run() error = %v, want *NodeError", err)
 	}
-	if want := (flow.NodeError{Node: "b", Step: 2, Attempt: 1, Err: errBoom}); *nerr != want {
+	if want := (flow.NodeError{RunID: testRunID, Node: "b", Step: 2, Attempt: 1, Err: errBoom}); *nerr != want {
 		t.Errorf("Run() NodeError = %+v, want %+v", *nerr, want)
 	}
 	if !errors.Is(err, errBoom) {
@@ -737,7 +767,7 @@ func TestRunnerRunRetry(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Compile() error = %v", err)
 		}
-		res, err := runner.Run(t.Context(), &probe{})
+		res, err := runner.Run(t.Context(), &probe{}, flow.WithRunID(testRunID))
 		if err != nil {
 			t.Fatalf("Run() error = %v, want nil", err)
 		}
@@ -762,7 +792,7 @@ func TestRunnerRunRetry(t *testing.T) {
 				t.Fatalf("Compile() error = %v", err)
 			}
 			start := time.Now()
-			if _, err := runner.Run(t.Context(), &probe{}); err != nil {
+			if _, err := runner.Run(t.Context(), &probe{}, flow.WithRunID(testRunID)); err != nil {
 				t.Fatalf("Run() error = %v, want nil", err)
 			}
 			if got := time.Since(start); got != time.Second {
@@ -785,7 +815,7 @@ func TestRunnerRunRetry(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Compile() error = %v", err)
 		}
-		_, err = runner.Run(t.Context(), &probe{})
+		_, err = runner.Run(t.Context(), &probe{}, flow.WithRunID(testRunID))
 		var nerr *flow.NodeError
 		if !errors.As(err, &nerr) {
 			t.Fatalf("Run() error = %v, want *NodeError", err)
@@ -815,7 +845,7 @@ func TestRunnerRunRetry(t *testing.T) {
 			}()
 
 			start := time.Now()
-			_, err = runner.Run(ctx, &probe{})
+			_, err = runner.Run(ctx, &probe{}, flow.WithRunID(testRunID))
 			if !errors.Is(err, context.Canceled) {
 				t.Fatalf("Run() error = %v, want %v", err, context.Canceled)
 			}
@@ -849,7 +879,7 @@ func TestRunnerRunTimeout(t *testing.T) {
 				t.Fatalf("Compile() error = %v", err)
 			}
 			start := time.Now()
-			_, err = runner.Run(t.Context(), &probe{})
+			_, err = runner.Run(t.Context(), &probe{}, flow.WithRunID(testRunID))
 			var nerr *flow.NodeError
 			if !errors.As(err, &nerr) {
 				t.Fatalf("Run() error = %v, want *NodeError", err)
@@ -882,7 +912,7 @@ func TestRunnerRunTimeout(t *testing.T) {
 				t.Fatalf("Compile() error = %v", err)
 			}
 			start := time.Now()
-			_, err = runner.Run(t.Context(), &probe{})
+			_, err = runner.Run(t.Context(), &probe{}, flow.WithRunID(testRunID))
 			var nerr *flow.NodeError
 			if !errors.As(err, &nerr) {
 				t.Fatalf("Run() error = %v, want *NodeError", err)
@@ -921,7 +951,7 @@ func TestRunnerRunCancellation(t *testing.T) {
 			cancel()
 		}()
 
-		res, err := runner.Run(ctx, &probe{})
+		res, err := runner.Run(ctx, &probe{}, flow.WithRunID(testRunID))
 		<-done
 		if !errors.Is(err, context.Canceled) {
 			t.Fatalf("Run() error = %v, want %v", err, context.Canceled)
@@ -945,7 +975,7 @@ func TestRunnerRunCancellation(t *testing.T) {
 		cancel()
 
 		var p probe
-		res, err := runner.Run(ctx, &p)
+		res, err := runner.Run(ctx, &p, flow.WithRunID(testRunID))
 		if !errors.Is(err, context.Canceled) {
 			t.Fatalf("Run() error = %v, want %v", err, context.Canceled)
 		}
@@ -972,7 +1002,7 @@ func TestRunnerRunCancellation(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Compile() error = %v", err)
 		}
-		_, err = runner.Run(ctx, &probe{})
+		_, err = runner.Run(ctx, &probe{}, flow.WithRunID(testRunID))
 		if !errors.Is(err, context.Canceled) {
 			t.Fatalf("Run() error = %v, want %v", err, context.Canceled)
 		}
@@ -998,7 +1028,7 @@ func TestRunnerRunConcurrent(t *testing.T) {
 	for range runs {
 		wg.Go(func() {
 			var p probe
-			res, err := runner.Run(t.Context(), &p)
+			res, err := runner.Run(t.Context(), &p, flow.WithRunID(testRunID))
 			if err != nil || !slices.Equal(res.Path, want) {
 				failures.Add(1)
 			}

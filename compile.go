@@ -1,9 +1,12 @@
 package flow
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"maps"
 	"slices"
+	"strings"
 	"sync"
 )
 
@@ -13,18 +16,25 @@ import (
 // do 3 aqui.
 type Runner[S any] struct {
 	name     string
+	version  string
 	start    string
 	order    []string
 	nodes    map[string]node[S]
 	edges    map[string][]string // alvos estáticos por nó, em ordem de declaração
 	branches map[string]branch[S]
 	detaches map[string][]string        // alvos destacados por nó, em ordem de declaração
-	blockers map[string]map[string]bool // blockers[n][u]: u chega a n por caminho de ida
+	forward  map[string]map[string]bool // forward[u][n]: u alcança n sem arestas de retorno
 	wg       sync.WaitGroup             // destacadas vivas, drenadas por Wait
 }
 
 // Name devolve o nome dado em New.
 func (r *Runner[S]) Name() string { return r.name }
+
+// Version devolve o hash de topologia: os primeiros 12 hex do SHA-256 de uma
+// serialização canônica com start, nós com Join e Failure, e todas as
+// arestas. Nome do grafo, router, retry e timeout ficam de fora: mudá-los não
+// muda o que uma fronteira salva significa.
+func (r *Runner[S]) Version() string { return r.version }
 
 // Compile valida a topologia inteira e devolve o Runner. Qualquer problema
 // devolve *CompileError com a lista completa. O builder continua utilizável
@@ -35,15 +45,15 @@ func (g *Graph[S]) Compile() (*Runner[S], error) {
 	}
 	r := &Runner[S]{
 		name:     g.name,
+		version:  g.version(),
 		start:    g.start,
 		order:    slices.Clone(g.order),
 		nodes:    maps.Clone(g.nodes),
 		edges:    make(map[string][]string, len(g.nodes)),
 		branches: make(map[string]branch[S], len(g.branches)),
 		detaches: make(map[string][]string, len(g.detaches)),
+		forward:  reachability(g.order, forwardEdges(g.start, g.successors())),
 	}
-	next := g.successors()
-	r.blockers = blockers(g.order, next, reachability(g.order, next))
 	for _, e := range g.edges {
 		r.edges[e.from] = append(r.edges[e.from], e.to)
 	}
@@ -93,39 +103,64 @@ func reachability(order []string, next map[string][]string) map[string]map[strin
 	return reaches
 }
 
-// blockers devolve, para cada nó n, os nós u que chegam a n por um caminho
-// de ida: nenhum intermediário é alcançável a partir de n. Quem só chega a
-// n dando a volta pelo ciclo que o próprio n fecha traz uma onda nova, não
-// uma chegada pendente desta, e por isso não segura o join de n.
-func blockers(order []string, next map[string][]string, reaches map[string]map[string]bool) map[string]map[string]bool {
-	preds := make(map[string][]string, len(order))
-	for _, from := range order {
-		for _, to := range next[from] {
-			if to != End {
-				preds[to] = append(preds[to], from)
+// forwardEdges devolve os sucessores sem as arestas de retorno: as que uma
+// busca em profundidade a partir de start, seguindo arestas em ordem de
+// declaração, encontra apontando para nó ainda na pilha. O que sobra é um
+// DAG, e é sobre ele que o join ordena candidatos: aresta de retorno diz
+// "o ciclo recomeça", não "este nó depende daquele".
+func forwardEdges(start string, next map[string][]string) map[string][]string {
+	const (
+		unvisited = iota
+		onStack
+		finished
+	)
+	state := make(map[string]int, len(next))
+	dag := make(map[string][]string, len(next))
+	var visit func(u string)
+	visit = func(u string) {
+		state[u] = onStack
+		for _, v := range next[u] {
+			if v == End || state[v] == onStack {
+				continue
+			}
+			dag[u] = append(dag[u], v)
+			if state[v] == unvisited {
+				visit(v)
 			}
 		}
+		state[u] = finished
 	}
-	result := make(map[string]map[string]bool, len(order))
-	for _, n := range order {
-		set := make(map[string]bool)
-		queue := []string{n}
-		for len(queue) > 0 {
-			cur := queue[0]
-			queue = queue[1:]
-			for _, p := range preds[cur] {
-				if p == n || set[p] {
-					continue
-				}
-				set[p] = true
-				if !reaches[n][p] {
-					queue = append(queue, p)
-				}
-			}
+	visit(start)
+	return dag
+}
+
+// version calcula o hash de topologia da seção 4.7. Nomes saem com %q para
+// nome com ponto e vírgula ou quebra de linha não colidir.
+func (g *Graph[S]) version() string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "start %q\n", g.start)
+	for _, name := range slices.Sorted(maps.Keys(g.nodes)) {
+		cfg := g.nodes[name].cfg
+		fmt.Fprintf(&b, "node %q join=%d failure=%d\n", name, cfg.join, cfg.failure)
+	}
+	lines := make([]string, 0, len(g.edges)+len(g.branches)+len(g.detaches))
+	for _, e := range g.edges {
+		lines = append(lines, fmt.Sprintf("edge %q %q", e.from, e.to))
+	}
+	for _, br := range g.branches {
+		for _, t := range br.targets {
+			lines = append(lines, fmt.Sprintf("branch %q %q", br.from, t))
 		}
-		result[n] = set
 	}
-	return result
+	for _, e := range g.detaches {
+		lines = append(lines, fmt.Sprintf("detach %q %q", e.from, e.to))
+	}
+	slices.Sort(lines)
+	for _, line := range lines {
+		b.WriteString(line + "\n")
+	}
+	sum := sha256.Sum256([]byte(b.String()))
+	return hex.EncodeToString(sum[:])[:12]
 }
 
 // validate aplica as validações da seção 4.6 da spec. A ordem das issues é

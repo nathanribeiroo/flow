@@ -267,3 +267,68 @@ func TestGraphCompile(t *testing.T) {
 		})
 	}
 }
+
+func TestRunnerVersion(t *testing.T) {
+	t.Parallel()
+	base := func() *flow.Graph[probe] {
+		return flow.New[probe]("g").
+			Add("a", visit("a"), flow.WithTimeout(time.Second), flow.WithRetry(2, 0)).
+			Add("b", visit("b")).
+			Start("a").
+			Edge("a", "b").
+			Branch("b", fixed(flow.End), "a", flow.End)
+	}
+	version := func(t *testing.T, g *flow.Graph[probe]) string {
+		t.Helper()
+		runner, err := g.Compile()
+		if err != nil {
+			t.Fatalf("Compile() error = %v", err)
+		}
+		return runner.Version()
+	}
+	tests := []struct {
+		name  string
+		graph func() *flow.Graph[probe]
+		same  bool
+	}{
+		{name: "same topology rebuilt", graph: base, same: true},
+		{name: "different router closure", graph: func() *flow.Graph[probe] {
+			return base().Branch("b", fixed("a"), "a", flow.End)
+		}, same: true},
+		{name: "different graph name", graph: func() *flow.Graph[probe] {
+			g := flow.New[probe]("renamed")
+			return g.Add("a", visit("a")).Add("b", visit("b")).Start("a").Edge("a", "b").Branch("b", fixed(flow.End), "a", flow.End)
+		}, same: true},
+		{name: "different timeout and retry", graph: func() *flow.Graph[probe] {
+			return base().Add("a", visit("a"), flow.WithTimeout(time.Minute), flow.WithRetry(5, time.Second))
+		}, same: true},
+		{name: "different join", graph: func() *flow.Graph[probe] {
+			return base().Add("b", visit("b"), flow.WithJoin(flow.JoinAny))
+		}},
+		{name: "different failure policy", graph: func() *flow.Graph[probe] {
+			return base().Add("a", visit("a"), flow.WithOnFailure(flow.FailureSkip))
+		}},
+		{name: "extra edge", graph: func() *flow.Graph[probe] {
+			return base().Add("c", visit("c"), flow.WithTimeout(time.Second)).Detach("a", "c")
+		}},
+		{name: "different branch targets", graph: func() *flow.Graph[probe] {
+			return base().Branch("b", fixed(flow.End), flow.End)
+		}},
+		{name: "different start", graph: func() *flow.Graph[probe] {
+			return base().Add("z", visit("z")).Start("z").Edge("z", "a")
+		}},
+	}
+	reference := version(t, base())
+	if len(reference) != 12 {
+		t.Fatalf("Version() = %q, want 12 hex chars", reference)
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := version(t, tt.graph())
+			if (got == reference) != tt.same {
+				t.Errorf("Version() = %q, reference %q, want same = %v", got, reference, tt.same)
+			}
+		})
+	}
+}

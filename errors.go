@@ -16,11 +16,19 @@ var (
 	// ErrUnknownTarget indica que um Router devolveu nome fora dos targets
 	// declarados no Branch.
 	ErrUnknownTarget = errors.New("flow: router returned an undeclared target")
+
+	// ErrVersionMismatch indica que o checkpoint foi gravado por um grafo com
+	// outro hash de topologia. A mensagem traz as duas versões.
+	ErrVersionMismatch = errors.New("flow: checkpoint belongs to a different graph version")
+
+	// ErrCheckpointNotFound indica que o store não tem checkpoint para o id.
+	ErrCheckpointNotFound = errors.New("flow: checkpoint not found")
 )
 
 // NodeError localiza a falha de um nó na execução. Step e Attempt começam
 // em 1. Unwrap expõe o erro original para errors.Is e errors.As.
 type NodeError struct {
+	RunID   string
 	Node    string
 	Step    int
 	Attempt int

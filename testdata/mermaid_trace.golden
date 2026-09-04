@@ -1,0 +1,12 @@
+flowchart TD
+    n_a["a"]
+    n_b["b"]
+    n_c["c"]
+    n_end["end"]
+    n_a --> n_b
+    n_b -->|branch| n_a
+    n_b -->|branch| n_c
+    n_b -->|branch| n_end
+    n_c --> n_end
+    classDef visited fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px
+    class n_a,n_b visited

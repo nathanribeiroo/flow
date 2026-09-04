@@ -1,9 +1,3 @@
-// Package flow executa um grafo de nós que compartilham um estado tipado.
-//
-// O builder Graph acumula nós, arestas, branches e arestas destacadas.
-// Compile valida a topologia inteira de uma vez e devolve um Runner
-// imutável, que atende quantas execuções simultâneas forem necessárias sem
-// lock.
 package flow
 
 import (

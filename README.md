@@ -189,6 +189,8 @@ Consequência a aceitar desde a primeira linha: **`S` precisa ser serializável 
 
 O checkpoint carrega o hash da topologia. Retomar um checkpoint gerado por outro grafo devolve `ErrVersionMismatch` em vez de rodar errado silenciosamente.
 
+Retomar reexecuta o passo que estava em andamento quando o processo caiu. Isso é *at-least-once* para os nós daquele passo: quem usa checkpoint precisa de nós idempotentes.
+
 ---
 
 ## Segurança de execução
@@ -220,6 +222,18 @@ g := production.Clone().Add("call_llm", stubLLM)
 
 ---
 
+## Custo do runner
+
+Microbenchmarks do overhead de orquestração, com nó vazio: é o que a lib adiciona por cima do que o seu nó faz. Apple M5, 10 núcleos, Go 1.26.1, sem `-race`, id gerado por `crypto/rand` (caminho padrão), mediana de três rodadas.
+
+| Benchmark | Grafo | Tempo | Memória | Alocações |
+| --- | --- | --- | --- | --- |
+| `BenchmarkLinear` | 5 nós sequenciais | 1,11 µs/op | 1 272 B/op | 27 |
+| `BenchmarkFanOut` | 1 → 4 → 1 | 6,2 µs/op | 2 064 B/op | 34 |
+| `BenchmarkConcurrentRuns` | 1 → 4 → 1, 1 000 `Run` simultâneos | 2,3 µs/run | 2,1 KB/run | 36 |
+
+Num turno de agente em que o modelo leva dois segundos, tudo isso é ruído. O número que importa é o terceiro: com mil execuções simultâneas o custo por `Run` **cai** para um terço do fan-out isolado, e as alocações ficam estáveis. É a aposta do grafo imutável sem estado compartilhado se confirmando.
+
 ## Roadmap
 
 | Versão | Entrega |
@@ -227,8 +241,8 @@ g := production.Clone().Add("call_llm", stubLLM)
 | v0.1 | Builder, `Compile` com validação, runner sequencial, `Branch`, timeout e retry por nó, erros tipados, Mermaid |
 | v0.2 | Superstep paralelo, `Join`, `OnFailure`, `Detach`, budget |
 | v0.3 | `Hook`, canal de eventos, `MermaidTrace` |
-| v0.4 | `Checkpointer`, `Resume`, hash de topologia |
-| v0.5 | `WithConflictCheck`, `Merge` opcional, benchmarks |
+| v0.4 | `Checkpointer`, `Resume` |
+| v0.5 | `WithConflictCheck`, benchmarks, congelamento da API |
 
 A API pública congela na v0.5. Antes disso, quebra sem dó.
 

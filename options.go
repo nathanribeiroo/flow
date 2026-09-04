@@ -94,6 +94,12 @@ type runConfig struct {
 	budget     time.Duration
 	hasBudget  bool
 	sequential bool
+	hooks      []Hook
+	events     chan<- Event
+	runID      string
+	hasRunID   bool // WithRunID foi passado; Resume rejeita
+	store      Checkpointer
+	conflict   bool
 }
 
 // WithMaxSteps limita o número de supersteps de um Run. Default 50. Estourar
@@ -118,4 +124,60 @@ func WithBudget(d time.Duration) RunOption {
 // determinísticos em paralelo, mas a ordem das escritas no estado não.
 func WithSequential() RunOption {
 	return func(c *runConfig) { c.sequential = true }
+}
+
+// WithHook registra um Hook. É acumulativo: NodeStart roda na ordem de
+// registro, NodeEnd na inversa, como defer. Hook nil é erro de uso,
+// reportado no início do Run.
+func WithHook(h Hook) RunOption {
+	return func(c *runConfig) { c.hooks = append(c.hooks, h) }
+}
+
+// WithEvents publica os eventos da execução em ch. O envio é não-bloqueante:
+// consumidor lento perde evento e nunca segura o runner. Quem cria o canal
+// fecha o canal, e só depois de Run retornar e de Wait drenar as destacadas;
+// a lib nunca fecha um canal que não criou.
+func WithEvents(ch chan<- Event) RunOption {
+	return func(c *runConfig) { c.events = ch }
+}
+
+// WithRunID define o id da execução, carimbado em Result, NodeInfo e
+// NodeError. Sem ele, ou com id vazio, a lib gera 16 bytes de crypto/rand em
+// hex, e Result.RunID é como o chamador descobre o id gerado.
+func WithRunID(id string) RunOption {
+	return func(c *runConfig) {
+		c.runID = id
+		c.hasRunID = true
+	}
+}
+
+// WithCheckpoint grava um Checkpoint em store ao fim de cada superstep
+// concluído, inclusive o terminal, e é o que Resume usa para retomar. Falha
+// em Save ou na serialização do estado aborta a execução: run que não dá
+// para retomar não pode parecer que dá. O estado inicial é serializado antes
+// do passo 1, e Run falha inline se não conseguir. Retomar reexecuta o passo
+// interrompido, então os nós precisam ser idempotentes: a garantia é
+// at-least-once para aquele passo.
+func WithCheckpoint(store Checkpointer) RunOption {
+	return func(c *runConfig) { c.store = store }
+}
+
+// WithConflictCheck detecta dois nós do mesmo superstep escrevendo no mesmo
+// campo de primeiro nível do estado e aborta com *ConflictError, um por
+// campo. Implica WithSequential: em paralelo não dá para atribuir campo a
+// nó. Tira snapshot JSON antes e depois de cada nó de um fan-out, então o
+// estado precisa serializar como objeto JSON, validado no início do Run, e o
+// custo é alto: ferramenta de desenvolvimento e de CI, nunca de produção.
+// Escrita de nó pulado por FailureSkip conta: a ferramenta detecta corrida,
+// não intenção.
+//
+// A granularidade é o campo de primeiro nível, e daí sai um falso positivo
+// por desenho: dois nós que escrevem em subcampos distintos de um mesmo
+// struct aninhado são reportados como conflito naquele campo. A saída é dar
+// a cada nó um campo de primeiro nível só dele.
+func WithConflictCheck() RunOption {
+	return func(c *runConfig) {
+		c.conflict = true
+		c.sequential = true
+	}
 }
