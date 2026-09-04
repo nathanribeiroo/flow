@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "skills": {
+    "golang-master": {
+      "source": "pedronauck/skills",
+      "sourceType": "github",
+      "skillPath": "skills/mine/golang-master/SKILL.md",
+      "computedHash": "7bdf30bec77f8d3bad02d0672320c31a543a3cb0ff1fc60475dc387d999d3932"
+    }
+  }
+}

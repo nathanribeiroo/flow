@@ -1,0 +1,5 @@
+flowchart TD
+    n_a["a"]
+    n_b["b"]
+    n_a --> n_b
+    n_b --> n_a

@@ -1,0 +1,21 @@
+# Binários e artefatos de build
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+
+# Cobertura e perfis
+cover.out
+*.prof
+
+# Workspace local
+go.work
+go.work.sum
+
+# Editores e sistema
+.idea/
+.vscode/
+.DS_Store
