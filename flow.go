@@ -1,8 +1,9 @@
 // Package flow executa um grafo de nós que compartilham um estado tipado.
 //
-// O builder Graph acumula nós, arestas e branches. Compile valida a
-// topologia inteira de uma vez e devolve um Runner imutável, que atende
-// quantas execuções simultâneas forem necessárias sem lock.
+// O builder Graph acumula nós, arestas, branches e arestas destacadas.
+// Compile valida a topologia inteira de uma vez e devolve um Runner
+// imutável, que atende quantas execuções simultâneas forem necessárias sem
+// lock.
 package flow
 
 import (
@@ -51,6 +52,7 @@ type Graph[S any] struct {
 	nodes    map[string]node[S]
 	edges    []edge
 	branches []branch[S]
+	detaches []edge
 	issues   []Issue // problemas detectados no builder
 }
 
@@ -114,8 +116,19 @@ func (g *Graph[S]) Branch(from string, route Router[S], targets ...string) *Grap
 	return g
 }
 
-// Clone devolve um builder independente, com nós, arestas e branches
-// copiados. Mudanças no clone não afetam o original.
+// Detach declara uma aresta destacada: to dispara quando from conclui, fora
+// da fronteira e sobre uma cópia do estado. É ortogonal ao roteamento: from
+// pode ter Edge ou Branch além de Detach. Duplicata é ignorada.
+func (g *Graph[S]) Detach(from, to string) *Graph[S] {
+	e := edge{from: from, to: to}
+	if !slices.Contains(g.detaches, e) {
+		g.detaches = append(g.detaches, e)
+	}
+	return g
+}
+
+// Clone devolve um builder independente, com nós, arestas, branches e
+// destacadas copiados. Mudanças no clone não afetam o original.
 func (g *Graph[S]) Clone() *Graph[S] {
 	c := &Graph[S]{
 		name:     g.name,
@@ -124,6 +137,7 @@ func (g *Graph[S]) Clone() *Graph[S] {
 		nodes:    maps.Clone(g.nodes),
 		edges:    slices.Clone(g.edges),
 		branches: make([]branch[S], 0, len(g.branches)),
+		detaches: slices.Clone(g.detaches),
 		issues:   slices.Clone(g.issues),
 	}
 	for _, b := range g.branches {

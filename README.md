@@ -200,7 +200,7 @@ Quatro proteções, todas ligadas por padrão:
 | `WithMaxSteps(n)` | Corta ciclo infinito. Default: 50. |
 | `WithBudget(d)` | Deadline da execução inteira, checado antes de cada superstep e aplicado ao `ctx`. |
 | Cancelamento | O `ctx` do `Run` desce até dentro do nó. Cliente desligou, goroutine morre. |
-| Detecção de travamento | Fronteira vazia com nó pendente devolve `ErrStuck` em vez de pendurar. |
+| Progresso garantido | O join ordena candidatos, então todo passo avança. Travar é impossível por construção. |
 
 Timeout por nó protege o nó. Orçamento protege o SLO. Você quer os dois.
 

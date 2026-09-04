@@ -18,6 +18,8 @@ Cinco, em ordem de precedência. Quando duas se chocam, ganha a de cima.
 4. **Erro de topologia morre no `Compile`.** O que dá para validar antes de rodar, valida antes de rodar, e reporta tudo de uma vez.
 5. **Toda goroutine tem dono, saída e forma de ser esperada.** Sem exceção, incluindo aresta destacada.
 
+Desvio registrado no princípio 3: o `Runner` carrega um `sync.WaitGroup` para as goroutines destacadas, porque a seção 4.4 exige `Wait` e goroutine sem forma de ser esperada é proibida pela regra 4 da seção 2.2. É o único estado mutável do `Runner`, e o princípio 5 ganha do 3 aqui. Restrição de uso, obrigatória no doc comment de `Wait`: chame depois de parar de aceitar novos `Run`. `WaitGroup.Add` concorrente com um `Wait` que já zerou é uso indevido documentado pela stdlib, e a sequência de shutdown é responsabilidade do servidor, não da lib.
+
 ---
 
 ## 2. Convenções de código
@@ -163,11 +165,15 @@ const (
 
 Semântica de `FailureSkip`: o nó conta como **concluído** para efeito de join, não contribui com estado, e o erro vai para `Result.Errors`. É o que faz consulta parcial a múltiplos KBs funcionar sem caso especial.
 
+Roteamento de nó pulado, e a assimetria é proposital: as arestas **estáticas** dele disparam normalmente, que é o que faz `FailureSkip` significar "esse passo era opcional, siga"; o nó entra em `Path`; mas o `Router` de um `Branch` **não é chamado**, porque rotear a partir de um estado que o nó não conseguiu produzir é decidir em cima de lixo. Na prática, nó pulado com `Branch` encerra aquele ramo. Isso precisa estar escrito no doc comment de `FailureSkip`, senão surpreende.
+
 Semântica de `WithRetry`: **`attempts` é o total de execuções, incluindo a primeira.** `WithRetry(3, d)` executa o nó no máximo três vezes; `WithRetry(1, d)` desliga a retentativa e é equivalente a não usar a option. O nome do parâmetro é a documentação, e a validação 8 (`attempts >= 1`) só faz sentido nessa leitura.
 
 `NodeError.Attempt` conta a partir de 1, casando com a mesma contagem: a falha da primeira execução chega com `Attempt: 1`.
 
 A tentativa é do nó, dentro do superstep. Irmão que já terminou não reexecuta. Entre tentativas, o laço checa cancelamento via `select` com `ctx.Done()`.
+
+`WithTimeout` vale **por tentativa**, não pelo nó inteiro: cada tentativa recebe deadline novo. O pior caso de um nó é `attempts × (timeout + backoff)`, e quem limita isso é o `WithBudget` — mais uma razão para os dois coexistirem.
 
 ### 3.4 Runner
 
@@ -209,11 +215,13 @@ type Result struct {
     RunID   string
     Version string
     Steps   int
-    Path    []string      // nós concluídos, em ordem de conclusão
+    Path    []string      // nós executados, agrupados por superstep
     Errors  []error       // erros de nós com FailureSkip
     Elapsed time.Duration
 }
 ```
+
+`Path` e `Errors` são **determinísticos mesmo com execução paralela**: dentro de um superstep as entradas são ordenadas pelo índice de declaração do nó, nunca pela ordem de conclusão. Ordem de conclusão obrigaria todo teste que toca esses campos a ordenar antes de comparar, e faria relatório de bug não reproduzir. O custo é uma ordenação por superstep.
 
 ### 3.7 Observabilidade
 
@@ -285,7 +293,6 @@ func NewMemoryStore() *MemoryStore
 var (
     ErrMaxSteps       = errors.New("flow: max steps exceeded")
     ErrBudget         = errors.New("flow: budget exceeded")
-    ErrStuck          = errors.New("flow: no runnable node and pending joins remain")
     ErrUnknownTarget  = errors.New("flow: router returned an undeclared target")
     ErrVersionMismatch = errors.New("flow: checkpoint belongs to a different graph version")
     ErrCheckpointNotFound = errors.New("flow: checkpoint not found")
@@ -346,27 +353,39 @@ para cada superstep:
     checkpoint (se configurado)
     step++
 
-    se frontier vazia e há join pendente -> ErrStuck
 ```
 
 **Fast-path obrigatório:** `len(frontier) == 1` executa inline, sem goroutine, sem `errgroup`. O caminho linear não paga pelo paralelismo que não usa. Isso não é otimização prematura; é o caso dominante.
 
-**Fan-out:** `errgroup.WithContext` com `SetLimit` configurável. Nó com `FailureAbort` cancela os irmãos; nó com `FailureSkip` não.
+**Fan-out:** `errgroup.WithContext`, **sem `SetLimit`**. A fronteira já é limitada pela topologia, e um limite configurável seria mais uma option para manter sem caso de uso real. `WithSequential` é o único botão.
+
+**Erro no fan-out:** nó com `FailureAbort` cancela os irmãos; nó com `FailureSkip` não. Irmão que retorna erro apenas porque o contexto do grupo foi cancelado — `errors.Is(err, context.Canceled)` com o contexto do grupo já cancelado — é descartado: não é falha, é consequência. Dois abortos reais no mesmo passo são embrulhados cada um em `*NodeError` e combinados com `errors.Join`. Cancelamento do chamador e estouro de budget têm precedência sobre qualquer `*NodeError`.
 
 **Ordem da fronteira:** a fronteira é o conjunto dos alvos do passo, sem repetição, **na ordem em que as arestas foram declaradas no builder**. Ordem de iteração de map é proibida em qualquer ponto que afete comportamento observável: ela quebraria o golden file do Mermaid, o `Path` do `Result` e a promessa de determinismo do `WithSequential`. Guarde as arestas em slice e use map só como índice.
 
 ### 4.2 Join
 
-A regra precisa ser exata, porque é onde grafo cíclico costuma travar.
+A regra da primeira versão desta spec estava errada e foi substituída. Ela contava predecessores pendentes, mas como todo nó da fronteira termina dentro do próprio superstep, o contador zerava sempre: `JoinAll` virava `JoinAny`, losango desbalanceado executava o convergente duas vezes, e `ErrStuck` nunca era alcançável.
 
-Cada nó tem um conjunto `preds`: os nós com aresta estática para ele, mais os nós que o declararam como `target` em `Branch`. O runner mantém, por execução, um contador de predecessores **pendentes** por nó.
+A regra correta não conta predecessores. Ela **ordena candidatos**.
 
-Quando um nó entra na fronteira, ele incrementa o pendente de cada alvo possível dele. Quando termina e roteia, ele **resolve** cada alvo possível: chegou ou não chegou. Como superstep é discreto, ao fim do passo todas as decisões de roteamento daquele passo são conhecidas.
+No `Compile`, precompute a matriz de alcançabilidade `reaches[a][b]` sobre o grafo estático — arestas estáticas mais alvos declarados em `Branch`, excluindo destacadas.
 
-- `JoinAll`: o nó entra na próxima fronteira quando teve ao menos uma chegada **e** não resta predecessor pendente.
-- `JoinAny`: entra na primeira chegada. Chegadas posteriores da mesma onda são descartadas.
+Ao fim de cada superstep:
 
-Fronteira vazia com pendente diferente de zero é topologia travada. O runner devolve `ErrStuck` com os nós envolvidos, em vez de pendurar. Sem exceção — este é o comportamento que separa uma lib usável de uma que some com o turno do cliente.
+1. `candidates` = nós com ao menos uma chegada ainda não consumida.
+2. Candidato com `JoinAny` dispara na hora; as demais chegadas daquela onda são descartadas.
+3. Candidato com `JoinAll` dispara **a menos que outro candidato o alcance** — ou seja, exista candidato `u != n` com `reaches[u][n]`. Nesse caso `n` espera: `u` roda antes e a chegada dele entra depois.
+4. Alcançabilidade mútua (dois candidatos no mesmo ciclo) desempata por ordem de declaração: o primeiro dispara, o outro espera.
+5. A fronteira é o conjunto dos que dispararam, em ordem de declaração.
+
+Três consequências, todas obrigatórias:
+
+- **Progresso é garantido.** Todo passo com candidatos produz ao menos um nó disparando, então fronteira vazia com chegada pendente não existe. Logo `ErrStuck` é inalcançável e **sai da spec**, pela mesma regra de sentinela da seção 6 que vale para todo o resto. Ciclo infinito continua contido por `WithMaxSteps`.
+- **`Branch` que não dispara um ramo não trava o join.** O alvo que não recebeu chegada não é candidato, e o convergente roda com o que chegou. Isso é inegociável: `JoinAll` é o default, e "roteia para um de dois e converge" é topologia comum demais para deadlocar por padrão.
+- **Losango desbalanceado roda o convergente uma vez.** Em `b → d` e `c → e → d`, no passo em que `b` chega, `e` ainda é candidato e alcança `d`, então `d` espera.
+
+Custo: a matriz é O(V³) uma vez no `Compile`, com V na casa das dezenas, e a checagem por passo é O(candidatos²).
 
 ### 4.3 Estado e escrita concorrente
 
@@ -392,9 +411,11 @@ Contrato, e cada item existe porque a alternativa é um bug:
 
 - **Contexto:** `context.WithTimeout(context.WithoutCancel(ctx), timeout)`. Sem `WithoutCancel`, o destacado morre junto com o fluxo principal. Sem `WithTimeout`, ele roda para sempre. Timeout é obrigatório: `Detach` para nó sem `WithTimeout` é erro de compilação do grafo.
 - **Estado:** recebe cópia rasa de `S`; escritas são descartadas. Ponteiro dentro de `S` continua compartilhado, e isso está documentado como responsabilidade do usuário.
+- **Instante da cópia:** no **fim do superstep em que `from` concluiu**, nunca no instante da conclusão. Copiar enquanto irmãos ainda escrevem é corrida garantida, e o `-race` acusa. No caminho linear os dois instantes coincidem. Consequência a documentar: o destacado enxerga também o que os irmãos escreveram naquele passo.
 - **Topologia:** o alvo precisa ser sink. Aresta saindo de alvo destacado é erro no `Compile`.
 - **Ciclo de vida:** cada destacado registra em um `sync.WaitGroup` do `Runner`, drenado por `Wait`.
-- **Erro:** vai para `Hook` e canal de eventos. Não entra em `Result` nem aborta nada.
+- **Erro:** vai para `Hook` e canal de eventos. Não entra em `Result` nem aborta nada. Antes da v0.3, onde nenhum dos dois existe, o erro é descartado com comentário justificando o descarte, como manda a regra 1 da seção 2.2.
+- **Retry:** usa o mesmo caminho de tentativa dos demais nós, com timeout por tentativa.
 - **Garantia:** nenhuma. Pod escalando para baixo evapora o destacado. Serve para telemetria, aquecimento de cache e pré-busca. **Nunca** para o que precisa acontecer — isso é mensagem em fila.
 
 ### 4.5 Cancelamento e orçamento
@@ -402,6 +423,8 @@ Contrato, e cada item existe porque a alternativa é um bug:
 O `ctx` do `Run` desce até dentro do nó, então cancelamento chega em chamada HTTP em voo. Não é checagem entre supersteps.
 
 `WithBudget(d)` aplica deadline ao contexto da execução **e** é verificado antes de abrir cada superstep. Erro é `ErrBudget`, distinguível de falha de nó, porque é ele que vira SLO.
+
+Implementação: `context.WithTimeoutCause(ctx, d, ErrBudget)`. Estouro dentro de um nó chega lá como `context.DeadlineExceeded` e é reclassificado por `context.Cause` no retorno do `Run`, o que separa budget estourado de deadline que já vinha no contexto do chamador.
 
 Timeout por nó protege o nó. Orçamento protege o turno. Três nós de 2s passam em qualquer timeout individual de 3s e ainda assim estouram uma janela de 5s.
 
@@ -461,7 +484,7 @@ O que precisa estar coberto para a lib ser confiável. Tudo table-driven, com su
 | --- | --- |
 | Compile | Cada uma das 9 validações; múltiplos problemas reportados juntos |
 | Roteamento | Aresta estática, branch, alvo não declarado, rota para `End`, ordem de fronteira estável |
-| Join | `JoinAll` com dois ramos, `JoinAny`, join com ciclo, deadlock devolvendo `ErrStuck` |
+| Join | `JoinAll` com dois ramos, `JoinAny`, join com ciclo, losango desbalanceado executando o convergente uma vez, `Branch` que não dispara um ramo não travando o convergente |
 | Falha | `FailureAbort` cancela irmãos; `FailureSkip` segue e popula `Result.Errors` |
 | Retry | Sucesso na segunda tentativa; cancelamento durante o backoff |
 | Budget | Estouro entre supersteps e no meio de um nó |
@@ -489,7 +512,7 @@ Restrição temporal, válida até a v0.2: **nenhum teste da v0.1 pode depender 
 | Versão | Entrega | Pronto quando |
 | --- | --- | --- |
 | v0.1 | Builder sem `Detach`, `Compile` com as validações 1–5 e 7–9, runner sequencial, `Branch`, `WithTimeout`, `WithRetry`, `NodeError`, `CompileError`, `ErrMaxSteps`, `ErrUnknownTarget`, `Mermaid` | Um grafo linear com ciclo roda e desenha |
-| v0.2 | Superstep paralelo, `Join`, `OnFailure`, `Detach` com a validação 6, `WithBudget`, `ErrBudget`, `ErrStuck` | Fan-out de 2 KBs com join e destacada de auditoria roda sob `-race` |
+| v0.2 | Superstep paralelo, `Join`, `OnFailure`, `Detach` com a validação 6, `WithBudget`, `ErrBudget`, `WithSequential`, `Result.Errors` | Fan-out de 2 KBs com join e destacada de auditoria roda sob `-race` |
 | v0.3 | `Hook`, canal de eventos, `MermaidTrace` | Trace OTel de ponta a ponta e CLI ao vivo funcionando |
 | v0.4 | `Checkpointer`, `Resume`, hash de topologia | Mata o processo no meio, sobe e retoma |
 | v0.5 | `WithConflictCheck`, `Merge` opcional, benchmarks, congelamento da API | Benchmarks publicados no README |

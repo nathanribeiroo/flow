@@ -4,19 +4,33 @@ import (
 	"context"
 	"errors"
 	"slices"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/nathanribeiroo/flow"
 )
 
-// probe é o estado dos testes: guarda a ordem em que os nós rodaram.
+// probe é o estado dos testes: guarda a ordem em que os nós rodaram. O mutex
+// existe porque nós do mesmo superstep rodam em paralelo e todos escrevem
+// aqui; em produção cada nó escreveria só nos campos dele.
 type probe struct {
+	mu      sync.Mutex
 	visited []string
+}
+
+// seen devolve uma cópia da lista de nós que rodaram.
+func (p *probe) seen() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return slices.Clone(p.visited)
 }
 
 // visit devolve um nó que registra name no estado.
 func visit(name string) flow.Node[probe] {
 	return func(_ context.Context, p *probe) error {
+		p.mu.Lock()
+		defer p.mu.Unlock()
 		p.visited = append(p.visited, name)
 		return nil
 	}
@@ -40,7 +54,7 @@ func runProbe(t *testing.T, g *flow.Graph[probe]) (flow.Result, []string) {
 	if err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
-	return res, p.visited
+	return res, p.seen()
 }
 
 func TestGraphClone(t *testing.T) {
@@ -101,6 +115,29 @@ func TestGraphClone(t *testing.T) {
 		}
 		if want := (flow.Issue{Reason: "node name is empty"}); !slices.Contains(cerr.Issues, want) {
 			t.Errorf("Compile() issues = %v, want to contain %v", cerr.Issues, want)
+		}
+	})
+
+	t.Run("clone copies detached edges", func(t *testing.T) {
+		t.Parallel()
+		original := flow.New[probe]("g").
+			Add("a", visit("a")).
+			Add("audit", visit("audit"), flow.WithTimeout(time.Second)).
+			Start("a").
+			Edge("a", flow.End).
+			Detach("a", "audit")
+		clone := original.Clone().Detach("a", "audit")
+
+		orig, err := original.Compile()
+		if err != nil {
+			t.Fatalf("Compile() original error = %v", err)
+		}
+		cloned, err := clone.Compile()
+		if err != nil {
+			t.Fatalf("Compile() clone error = %v", err)
+		}
+		if orig.Mermaid() != cloned.Mermaid() {
+			t.Errorf("Mermaid() differs:\n%s\nwant\n%s", cloned.Mermaid(), orig.Mermaid())
 		}
 	})
 

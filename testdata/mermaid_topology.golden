@@ -3,9 +3,11 @@ flowchart TD
     n_search_kb["search-kb"]
     n_call_llm["call llm"]
     n_say__hi_["say #quot;hi#quot;"]
+    n_audit["audit"]
     n_end["end"]
     n_plan --> n_search_kb
     n_plan --> n_call_llm
+    n_plan -.-> n_audit
     n_search_kb --> n_end
     n_call_llm -->|branch| n_say__hi_
     n_call_llm -->|branch| n_end

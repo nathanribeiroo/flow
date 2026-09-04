@@ -8,8 +8,9 @@ import (
 // Mermaid devolve a topologia em sintaxe flowchart. Os ids são sanitizados
 // (prefixo n_ e tudo fora de [A-Za-z0-9_] vira _) porque end, graph e class
 // são palavras reservadas e nome de nó é string livre; o nome real vai no
-// label. Aresta cheia é estática e |branch| é condicional. Nós saem em
-// ordem de Add, End por último e só se algum nó apontar para ele.
+// label. Aresta cheia é estática, |branch| é condicional e tracejada é
+// destacada. Nós saem em ordem de Add, End por último e só se algum nó
+// apontar para ele.
 func (r *Runner[S]) Mermaid() string {
 	var b strings.Builder
 	b.WriteString("flowchart TD\n")
@@ -30,6 +31,9 @@ func (r *Runner[S]) Mermaid() string {
 		}
 		for _, to := range r.branches[name].targets {
 			b.WriteString("    " + from + " -->|branch| " + mermaidID(to) + "\n")
+		}
+		for _, to := range r.detaches[name] {
+			b.WriteString("    " + from + " -.-> " + mermaidID(to) + "\n")
 		}
 	}
 	return b.String()

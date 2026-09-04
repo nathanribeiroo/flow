@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/nathanribeiroo/flow"
 )
@@ -23,12 +24,14 @@ func TestRunnerMermaid(t *testing.T) {
 					Add("search-kb", visit("search-kb")).
 					Add("call llm", visit("call llm")).
 					Add(`say "hi"`, visit("say")).
+					Add("audit", visit("audit"), flow.WithTimeout(time.Second)).
 					Start("plan").
 					Edge("plan", "search-kb").
 					Edge("plan", "call llm").
 					Edge("search-kb", flow.End).
 					Branch("call llm", fixed(flow.End), `say "hi"`, flow.End).
-					Edge(`say "hi"`, flow.End)
+					Edge(`say "hi"`, flow.End).
+					Detach("plan", "audit")
 			},
 			golden: "mermaid_topology.golden",
 		},

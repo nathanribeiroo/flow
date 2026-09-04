@@ -10,6 +10,9 @@ var (
 	// ErrMaxSteps indica que a execução ultrapassou o limite de WithMaxSteps.
 	ErrMaxSteps = errors.New("flow: max steps exceeded")
 
+	// ErrBudget indica que a execução ultrapassou a duração de WithBudget.
+	ErrBudget = errors.New("flow: budget exceeded")
+
 	// ErrUnknownTarget indica que um Router devolveu nome fora dos targets
 	// declarados no Branch.
 	ErrUnknownTarget = errors.New("flow: router returned an undeclared target")

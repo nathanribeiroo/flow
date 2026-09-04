@@ -150,6 +150,59 @@ func TestGraphCompile(t *testing.T) {
 			want: []flow.Issue{{Node: "a_b", Reason: `mermaid id "n_a_b" collides with node "a-b"`}},
 		},
 		{
+			name: "detach target has outgoing edges",
+			graph: func() *flow.Graph[probe] {
+				return flow.New[probe]("g").
+					Add("a", visit("a")).Add("audit", visit("audit"), flow.WithTimeout(time.Second)).
+					Start("a").
+					Edge("a", flow.End).Edge("audit", flow.End).
+					Detach("a", "audit")
+			},
+			want: []flow.Issue{{Node: "audit", Reason: "detach target has outgoing edges"}},
+		},
+		{
+			name: "detach target without timeout",
+			graph: func() *flow.Graph[probe] {
+				return flow.New[probe]("g").
+					Add("a", visit("a")).Add("audit", visit("audit")).
+					Start("a").
+					Edge("a", flow.End).
+					Detach("a", "audit")
+			},
+			want: []flow.Issue{{Node: "audit", Reason: "detach target has no timeout"}},
+		},
+		{
+			name: "detach source does not exist",
+			graph: func() *flow.Graph[probe] {
+				return flow.New[probe]("g").
+					Add("a", visit("a")).Add("audit", visit("audit"), flow.WithTimeout(time.Second)).
+					Start("a").
+					Edge("a", flow.End).
+					Detach("zz", "audit")
+			},
+			want: []flow.Issue{
+				{Node: "zz", Reason: "detach source does not exist"},
+				{Node: "audit", Reason: "unreachable from start"},
+			},
+		},
+		{
+			name: "detach to unknown node",
+			graph: func() *flow.Graph[probe] {
+				return flow.New[probe]("g").Add("a", visit("a")).Start("a").Edge("a", flow.End).Detach("a", "zz")
+			},
+			want: []flow.Issue{{Node: "a", Reason: `detach to unknown node "zz"`}},
+		},
+		{
+			name: "detach target is a valid sink",
+			graph: func() *flow.Graph[probe] {
+				return flow.New[probe]("g").
+					Add("a", visit("a")).Add("audit", visit("audit"), flow.WithTimeout(time.Second)).
+					Start("a").
+					Branch("a", fixed(flow.End), flow.End).
+					Detach("a", "audit")
+			},
+		},
+		{
 			name: "multiple issues reported together",
 			graph: func() *flow.Graph[probe] {
 				return flow.New[probe]("g").

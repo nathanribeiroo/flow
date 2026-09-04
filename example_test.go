@@ -2,7 +2,9 @@ package flow_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"sync/atomic"
 	"time"
 
 	"github.com/nathanribeiroo/flow"
@@ -143,4 +145,82 @@ func ExampleCompileError() {
 	fmt.Println(err)
 	// Output:
 	// flow: graph "broken": 3 issues: node "fetch": edge to unknown node "missing"; node "orphan": unreachable from start; node "orphan": no outgoing edge
+}
+
+// Support é o estado do exemplo com fan-out: duas buscas em paralelo, join
+// e auditoria destacada. Cada nó escreve só no campo dele.
+type Support struct {
+	Question string
+	Plan     string
+	KB       []string
+	Web      []string
+	Answer   string
+}
+
+func planSupport(_ context.Context, s *Support) error {
+	s.Plan = "lookup: " + s.Question
+	return nil
+}
+
+func searchKB(_ context.Context, s *Support) error {
+	s.KB = []string{"kb hit for " + s.Plan}
+	return nil
+}
+
+func searchWeb(_ context.Context, _ *Support) error {
+	return errors.New("web search down")
+}
+
+func compose(_ context.Context, s *Support) error {
+	s.Answer = fmt.Sprintf("%d source(s)", len(s.KB)+len(s.Web))
+	return nil
+}
+
+// Fan-out com join, FailureSkip em uma das buscas e auditoria destacada.
+func ExampleRunner_Run_fanOut() {
+	var audits atomic.Int32
+	audit := func(_ context.Context, s *Support) error {
+		audits.Add(1)
+		s.Answer = "tampered" // escreve na cópia: o estado do Run não muda
+		return nil
+	}
+
+	runner, err := flow.New[Support]("support").
+		Add("plan", planSupport).
+		Add("search_kb", searchKB, flow.WithTimeout(time.Second), flow.WithOnFailure(flow.FailureSkip)).
+		Add("search_web", searchWeb, flow.WithTimeout(time.Second), flow.WithOnFailure(flow.FailureSkip)).
+		Add("answer", compose, flow.WithJoin(flow.JoinAll)).
+		Add("audit", audit, flow.WithTimeout(time.Second)).
+		Start("plan").
+		Edge("plan", "search_kb").
+		Edge("plan", "search_web").
+		Edge("search_kb", "answer").
+		Edge("search_web", "answer").
+		Edge("answer", flow.End).
+		Detach("plan", "audit").
+		Compile()
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+
+	ctx := context.Background()
+	support := Support{Question: "reset password"}
+	res, err := runner.Run(ctx, &support, flow.WithBudget(5*time.Second))
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+	if err := runner.Wait(ctx); err != nil {
+		fmt.Println(err)
+		return
+	}
+
+	fmt.Println(support.Answer)
+	fmt.Println(res.Path)
+	fmt.Println(len(res.Errors), audits.Load())
+	// Output:
+	// 1 source(s)
+	// [plan search_kb search_web answer]
+	// 1 1
 }
