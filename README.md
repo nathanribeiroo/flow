@@ -222,6 +222,17 @@ g := production.Clone().Add("call_llm", stubLLM)
 
 ---
 
+## Como verificar
+
+```bash
+gofmt -l .
+go vet ./...
+go test -race ./...
+go run ./examples/agent
+```
+
+---
+
 ## Custo do runner
 
 Microbenchmarks do overhead de orquestração, com nó vazio: é o que a lib adiciona por cima do que o seu nó faz. Apple M5, 10 núcleos, Go 1.26.1, sem `-race`, id gerado por `crypto/rand` (caminho padrão), mediana de três rodadas.
